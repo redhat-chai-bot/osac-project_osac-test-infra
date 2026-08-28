@@ -12,7 +12,7 @@ SOURCE_REF = "quay.io/containerdisks/fedora:41"
 
 
 def test_catalog_item_disk_image_default_applied(
-    grpc: GRPCClient, compute_instance_template: str, default_subnet_id: str
+    grpc: GRPCClient, compute_instance_template: str, default_subnet_id: str, default_storage_tier: str
 ) -> None:
     """AC-2 / TC-FR9-01: CatalogItem disk_image field_definition default is applied to the ComputeInstance."""
     di_id: str | None = None
@@ -42,7 +42,10 @@ def test_catalog_item_disk_image_default_applied(
 
         # disk_image is deliberately omitted — it must be inherited from the catalog default.
         ci_id = grpc.create_compute_instance(
-            name=unique_name("e2e-cidi-ci"), catalog_item=catalog_item_id, subnet_ids=[default_subnet_id]
+            name=unique_name("e2e-cidi-ci"),
+            catalog_item=catalog_item_id,
+            subnet_ids=[default_subnet_id],
+            boot_disk_storage_tier=default_storage_tier,
         )
 
         ci = grpc.get_compute_instance(ci_id=ci_id)
