@@ -69,6 +69,11 @@ on:
         required: false
         type: string
         default: ""
+      test-ref:
+        description: "Git ref of osac-project/osac to checkout for test code (tests/ and pyproject.toml). Defaults to main."
+        required: false
+        type: string
+        default: "main"
       components:
         description: >-
           JSON array of components to build from source and load onto the cluster, e.g.
@@ -136,6 +141,29 @@ jobs:
           repository: ${{ inputs.test-infra-repository || github.repository }}
           ref: ${{ inputs.test-infra-ref || '' }}
           persist-credentials: false
+
+      - name: Checkout test code from osac mono-repo
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          repository: osac-project/osac
+          ref: ${{ inputs.test-ref }}
+          path: osac-test-code
+          sparse-checkout: |
+            tests
+            pyproject.toml
+          persist-credentials: false
+
+      - name: Overlay test code from osac mono-repo
+        run: |
+          # Replace tests/ and pyproject.toml with versions from the osac
+          # mono-repo so the test image always uses the latest (or PR-specific)
+          # test code, even though Containerfile/scripts/monitoring stay from
+          # osac-test-infra.
+          rm -rf tests/
+          cp -r osac-test-code/tests .
+          cp osac-test-code/pyproject.toml .
+          rm -rf osac-test-code
+          echo "Overlaid tests/ and pyproject.toml from osac-project/osac@${{ inputs.test-ref }}"
 
       - name: Validate and bootstrap
         id: setup
