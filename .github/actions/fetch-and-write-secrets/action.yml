@@ -72,3 +72,44 @@ runs:
         printf '%s' "${AAP_LICENSE}" | base64 -d > "$RUNNER_TEMP/aap-license.zip"
         chmod 600 "$RUNNER_TEMP/aap-license.zip"
         echo "::endgroup::"
+
+    - name: Validate registry.redhat.io credentials
+      shell: bash
+      run: |
+        echo "::group::Validate registry.redhat.io credentials"
+
+        AUTH_JSON="${HOME}/.config/containers/auth.json"
+        REGISTRY="registry.redhat.io"
+        TOKEN_URL="https://sso.redhat.com/auth/realms/rhcc/protocol/redhat-docker-v2/auth"
+        VAULT_PATH="secret/data/osac/e2e/pull-secret"
+
+        # Extract the base64-encoded auth for registry.redhat.io
+        REGISTRY_AUTH=$(jq -r ".auths[\"${REGISTRY}\"].auth // empty" "${AUTH_JSON}")
+        if [[ -z "${REGISTRY_AUTH}" ]]; then
+          echo "::error::No auth entry found for ${REGISTRY} in ${AUTH_JSON}."
+          echo "::error::Update the pull-secret in Vault (${VAULT_PATH})."
+          exit 1
+        fi
+
+        # Attempt token exchange against the Red Hat SSO endpoint
+        HTTP_CODE=$(curl -s -o /dev/null -w '%{http_code}' \
+          --max-time 15 \
+          -H "Authorization: Basic ${REGISTRY_AUTH}" \
+          "${TOKEN_URL}?service=docker-registry&scope=repository:ubi9/ubi:pull" \
+        ) || {
+          echo "::warning::Could not reach ${TOKEN_URL} (network error). Skipping credential validation."
+          echo "::endgroup::"
+          exit 0
+        }
+
+        if [[ "${HTTP_CODE}" == "200" ]]; then
+          echo "registry.redhat.io credentials are valid."
+        elif [[ "${HTTP_CODE}" =~ ^(401|403)$ ]]; then
+          echo "::error::registry.redhat.io credentials are INVALID or EXPIRED (HTTP ${HTTP_CODE})."
+          echo "::error::Rotate the pull-secret in Vault (${VAULT_PATH}) and re-run."
+          exit 1
+        else
+          echo "::warning::Unexpected HTTP ${HTTP_CODE} from ${TOKEN_URL}. Continuing (may be a transient issue)."
+        fi
+
+        echo "::endgroup::"
