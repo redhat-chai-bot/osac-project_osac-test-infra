@@ -72,3 +72,56 @@ runs:
         printf '%s' "${AAP_LICENSE}" | base64 -d > "$RUNNER_TEMP/aap-license.zip"
         chmod 600 "$RUNNER_TEMP/aap-license.zip"
         echo "::endgroup::"
+
+    - name: Validate registry credentials
+      shell: bash
+      run: |
+        echo "::group::Validate registry.redhat.io credentials"
+        pull_secret="$RUNNER_TEMP/pull-secret.json"
+
+        # --- 1. Extract the Base64-encoded auth for registry.redhat.io ---
+        auth=$(jq -r '.auths["registry.redhat.io"].auth // empty' "$pull_secret")
+        if [[ -z "$auth" ]]; then
+          echo "::error::registry.redhat.io entry is missing from the pull secret." \
+               "Rotate the pull secret in Vault at secret/data/osac/e2e/pull-secret."
+          exit 1
+        fi
+
+        # --- 2. Discover the Bearer token realm from the registry ---
+        www_auth=$(curl -sS --max-time 10 \
+          -o /dev/null -w '%{http_code}' \
+          -D - https://registry.redhat.io/v2/ 2>&1 \
+          | grep -i '^www-authenticate:' | head -1) || true
+
+        realm=$(echo "$www_auth" \
+          | sed -n 's/.*realm="\([^"]*\)".*/\1/ip')
+
+        if [[ -z "$realm" ]]; then
+          echo "::warning::Could not discover auth realm from registry.redhat.io." \
+               "Skipping credential validation (the pull might still work)."
+          echo "::endgroup::"
+          exit 0
+        fi
+
+        # --- 3. Attempt a token exchange to verify credentials ---
+        http_code=$(curl -sS --max-time 10 \
+          -o /dev/null -w '%{http_code}' \
+          -H "Authorization: Basic ${auth}" \
+          "$realm") || {
+          echo "::warning::Token exchange request failed (network error)." \
+               "Skipping credential validation (the pull might still work)."
+          echo "::endgroup::"
+          exit 0
+        }
+
+        if [[ "$http_code" == 2* ]]; then
+          echo "registry.redhat.io credentials are valid (HTTP ${http_code})."
+        elif [[ "$http_code" == 401 || "$http_code" == 403 ]]; then
+          echo "::error::registry.redhat.io credentials are INVALID or EXPIRED (HTTP ${http_code})." \
+               "Rotate the pull secret in Vault at secret/data/osac/e2e/pull-secret."
+          exit 1
+        else
+          echo "::warning::Unexpected HTTP ${http_code} from token endpoint." \
+               "Skipping credential validation (the pull might still work)."
+        fi
+        echo "::endgroup::"
