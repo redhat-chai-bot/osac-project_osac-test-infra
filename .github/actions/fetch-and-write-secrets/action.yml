@@ -77,3 +77,16 @@ runs:
         printf '%s' "${AAP_LICENSE}" | base64 -d > "$RUNNER_TEMP/aap-license.zip"
         chmod 600 "$RUNNER_TEMP/aap-license.zip"
         echo "::endgroup::"
+
+    - name: Validate registry credentials
+      shell: bash
+      run: |
+        echo "::group::Validate registry.redhat.io credentials"
+        if skopeo inspect --no-tags --authfile "${HOME}/.config/containers/auth.json" \
+            docker://registry.redhat.io/ubi9/ubi-minimal:latest > /dev/null 2>&1; then
+          echo "registry.redhat.io credentials are valid."
+        else
+          echo "::error::registry.redhat.io credentials in Vault are expired or invalid. Renew secret/data/osac/e2e/pull-secret and re-run."
+          exit 1
+        fi
+        echo "::endgroup::"
