@@ -673,6 +673,15 @@ jobs:
           EOF
           done
 
+          # --- Wait for auto-generated tenant subnets to reach Ready ---
+          # Creating a Tenant auto-generates a default Subnet, but it starts
+          # in PENDING state. Tests that create BareMetalInstances will fail
+          # with "subnet not in READY state" if we proceed before the subnets
+          # have converged.
+          echo "Waiting for tenant default subnets to reach Ready..."
+          oc wait --for=condition=Ready subnet --all \
+            -n "${INSTALLER_NAMESPACE}" --timeout=120s
+
           # --- Apply CRDs shipped by built components ---
           # Helm's crds/ directory is only installed once on `helm install`
           # and never updated by a later `helm upgrade`, so a PR that changes
