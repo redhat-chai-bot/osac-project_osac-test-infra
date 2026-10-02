@@ -856,6 +856,7 @@ jobs:
           echo "url=http://${ROUTE_HOST}" >> "$GITHUB_OUTPUT"
       - name: Run E2E tests
         id: test
+        shell: bash
         env:
           TEST_FILTER: ${{ inputs.test-filter }}
           OSAC_NAMESPACE: ${{ inputs.namespace }}
@@ -892,33 +893,133 @@ jobs:
           rm -f "$RUNNER_TEMP/caas_ssh_key" "$RUNNER_TEMP/caas_ssh_key.pub"
           ssh-keygen -t ed25519 -f "$RUNNER_TEMP/caas_ssh_key" -N '' -q
 
-          podman run --rm --network=host \
-            -v "${KUBECONFIG_PATH}":/root/.kube/config:ro,Z \
-            -v "${RUNNER_TEMP}/pull-secret.json":/root/pull-secret:ro,Z \
-            -v "${RUNNER_TEMP}/aap-license.zip":/root/aap-license.zip:ro,Z \
-            -v "${RUNNER_TEMP}/caas_ssh_key.pub":/root/.ssh/id_rsa.pub:ro,Z \
-            -v "${RUNNER_TEMP}/test-output":/tmp/test-output:Z \
-            -e KUBECONFIG=/root/.kube/config \
-            -e OSAC_VM_KUBECONFIG=/root/.kube/config \
-            -e OSAC_NAMESPACE="${OSAC_NAMESPACE}" \
-            -e OSAC_VM_TEMPLATE="${OSAC_VM_TEMPLATE}" \
-            -e OSAC_CLUSTER_TEMPLATE="${OSAC_CLUSTER_TEMPLATE}" \
-            -e OSAC_BMI_TEMPLATE="${OSAC_BMI_TEMPLATE}" \
-            -e OSAC_BMH_NAMESPACE="${OSAC_BMH_NAMESPACE}" \
-            -e OSAC_PULL_SECRET_PATH=/root/pull-secret \
-            -e METERING_ADAPTER_URL="${METERING_ADAPTER_URL}" \
-            "${E2E_IMAGE}" \
-            pytest \
-              tests/e2e/vmaas/ \
-              tests/e2e/references/ \
-              tests/e2e/caas/ \
-              tests/e2e/bmaas/ \
-              --ignore=tests/e2e/bmaas/regression/networking \
-              --ignore=tests/e2e/vmaas/regression/external_ip \
-              --ignore=tests/e2e/vmaas/test_disabled_services.py \
-              -k "${FILTER}" \
-              -n 0 \
-              --junitxml=/tmp/test-output/junit.xml -v
+          # --- Common podman arguments (issue #470) ---
+          # Extracted to avoid duplicating the entire podman-run block four
+          # times now that each suite runs as a separate invocation.
+          PODMAN_VOLUMES=(
+            -v "${KUBECONFIG_PATH}":/root/.kube/config:ro,Z
+            -v "${RUNNER_TEMP}/pull-secret.json":/root/pull-secret:ro,Z
+            -v "${RUNNER_TEMP}/aap-license.zip":/root/aap-license.zip:ro,Z
+            -v "${RUNNER_TEMP}/caas_ssh_key.pub":/root/.ssh/id_rsa.pub:ro,Z
+            -v "${RUNNER_TEMP}/test-output":/tmp/test-output:Z
+          )
+          PODMAN_ENVS=(
+            -e KUBECONFIG=/root/.kube/config
+            -e OSAC_VM_KUBECONFIG=/root/.kube/config
+            -e OSAC_NAMESPACE="${OSAC_NAMESPACE}"
+            -e OSAC_VM_TEMPLATE="${OSAC_VM_TEMPLATE}"
+            -e OSAC_CLUSTER_TEMPLATE="${OSAC_CLUSTER_TEMPLATE}"
+            -e OSAC_BMI_TEMPLATE="${OSAC_BMI_TEMPLATE}"
+            -e OSAC_BMH_NAMESPACE="${OSAC_BMH_NAMESPACE}"
+            -e OSAC_PULL_SECRET_PATH=/root/pull-secret
+            -e METERING_ADAPTER_URL="${METERING_ADAPTER_URL}"
+          )
+
+          # --- Pod-pressure gate (issue #470) ---
+          # On single-node test clusters, running all suites in one pytest
+          # invocation spawns 200+ ephemeral pods that accumulate without
+          # cleanup, eventually hitting the node's maxPods limit (110-250).
+          # This gate waits until the pod count drops below a configurable
+          # threshold before starting the next suite.
+          POD_PRESSURE_THRESHOLD="${POD_PRESSURE_THRESHOLD:-80}"
+          POD_PRESSURE_TIMEOUT=600  # 10 minutes
+
+          wait_for_pod_pressure() {
+            local suite_name="$1"
+            echo "--- Pod-pressure gate before suite '${suite_name}' ---"
+            local elapsed=0
+            while true; do
+              local pod_count
+              pod_count=$(oc --kubeconfig="${KUBECONFIG_PATH}" get pods \
+                -n "${OSAC_NAMESPACE}" --no-headers 2>/dev/null | wc -l) || pod_count=999
+              if [ "${pod_count}" -lt "${POD_PRESSURE_THRESHOLD}" ]; then
+                echo "Pod count (${pod_count}) below threshold (${POD_PRESSURE_THRESHOLD}). Proceeding with '${suite_name}'."
+                return 0
+              fi
+              if [ "${elapsed}" -ge "${POD_PRESSURE_TIMEOUT}" ]; then
+                echo "::warning::Pod-pressure gate timed out after ${POD_PRESSURE_TIMEOUT}s (pods=${pod_count}, threshold=${POD_PRESSURE_THRESHOLD}). Proceeding anyway."
+                return 0
+              fi
+              echo "  Waiting for pods to drain: ${pod_count} >= ${POD_PRESSURE_THRESHOLD} (elapsed ${elapsed}s/${POD_PRESSURE_TIMEOUT}s)"
+              sleep 15
+              elapsed=$((elapsed + 15))
+            done
+          }
+
+          # --- Helper: run a single test suite in its own container ---
+          run_suite() {
+            local suite_name="$1"
+            local junit_file="$2"
+            shift 2
+            local extra_args=("$@")
+
+            echo "::group::Suite: ${suite_name}"
+            wait_for_pod_pressure "${suite_name}"
+            local rc=0
+            podman run --rm --network=host \
+              "${PODMAN_VOLUMES[@]}" \
+              "${PODMAN_ENVS[@]}" \
+              "${E2E_IMAGE}" \
+              pytest \
+                "tests/e2e/${suite_name}/" \
+                "${extra_args[@]}" \
+                -k "${FILTER}" \
+                -n 0 \
+                --junitxml="/tmp/test-output/${junit_file}" -v || rc=$?
+            echo "Suite '${suite_name}' finished (exit code ${rc})"
+            echo "::endgroup::"
+            return ${rc}
+          }
+
+          # --- Run each suite separately, continuing on failure ---
+          OVERALL_RC=0
+
+          run_suite vmaas junit-vmaas.xml \
+            --ignore=tests/e2e/vmaas/regression/external_ip \
+            --ignore=tests/e2e/vmaas/test_disabled_services.py || OVERALL_RC=1
+
+          run_suite references junit-references.xml || OVERALL_RC=1
+
+          run_suite caas junit-caas.xml || OVERALL_RC=1
+
+          run_suite bmaas junit-bmaas.xml \
+            --ignore=tests/e2e/bmaas/regression/networking || OVERALL_RC=1
+
+          # --- Merge per-suite JUnit XML files into a single report ---
+          # Downstream steps (gather-artifacts, AI diagnosis) expect a single
+          # junit.xml.  Combine per-suite files with stdlib xml.etree.
+          echo "::group::Merge JUnit XML reports"
+          python3 << 'MERGE_SCRIPT'
+          import xml.etree.ElementTree as ET
+          import glob, os, sys
+
+          output_dir = os.path.join(os.environ.get("RUNNER_TEMP", "/tmp"), "test-output")
+          merged = ET.Element("testsuites")
+          totals = {"tests": 0, "failures": 0, "errors": 0, "time": 0.0}
+
+          for path in sorted(glob.glob(os.path.join(output_dir, "junit-*.xml"))):
+              try:
+                  root = ET.parse(path).getroot()
+                  suites = root.findall("testsuite") if root.tag == "testsuites" else [root]
+                  for suite in suites:
+                      merged.append(suite)
+                      for k in ("tests", "failures", "errors"):
+                          totals[k] += int(suite.get(k, 0))
+                      totals["time"] += float(suite.get("time", 0))
+                  print(f"Merged: {os.path.basename(path)}")
+              except Exception as exc:
+                  print(f"Warning: could not parse {path}: {exc}", file=sys.stderr)
+
+          for k, v in totals.items():
+              merged.set(k, f"{v:.3f}" if k == "time" else str(v))
+
+          out = os.path.join(output_dir, "junit.xml")
+          ET.ElementTree(merged).write(out, encoding="unicode", xml_declaration=True)
+          print(f"Written {out} ({totals['tests']} tests, {totals['failures']} failures, {totals['errors']} errors)")
+          MERGE_SCRIPT
+          echo "::endgroup::"
+
+          exit ${OVERALL_RC}
 
       - name: Gather artifacts
         if: always()
