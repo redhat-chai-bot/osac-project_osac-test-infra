@@ -77,3 +77,17 @@ runs:
         printf '%s' "${AAP_LICENSE}" | base64 -d > "$RUNNER_TEMP/aap-license.zip"
         chmod 600 "$RUNNER_TEMP/aap-license.zip"
         echo "::endgroup::"
+
+    - name: Validate registry.redhat.io credentials
+      shell: bash
+      run: |
+        echo "::group::Validate registry.redhat.io credentials"
+        AUTH_FILE="${HOME}/.config/containers/auth.json"
+        if skopeo login --authfile "${AUTH_FILE}" registry.redhat.io; then
+          echo "registry.redhat.io credentials are valid"
+        else
+          echo "::error::registry.redhat.io authentication failed — the pull-secret credentials stored in Vault (secret/data/osac/e2e/pull-secret) are expired or invalid. Regenerate them at https://console.redhat.com/openshift/install/pull-secret and update the Vault secret."
+          echo "::endgroup::"
+          exit 1
+        fi
+        echo "::endgroup::"
