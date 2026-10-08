@@ -77,3 +77,15 @@ runs:
         printf '%s' "${AAP_LICENSE}" | base64 -d > "$RUNNER_TEMP/aap-license.zip"
         chmod 600 "$RUNNER_TEMP/aap-license.zip"
         echo "::endgroup::"
+
+    - name: Validate registry.redhat.io pull-secret
+      shell: bash
+      run: |
+        echo "::group::Validate registry.redhat.io pull-secret"
+        if ! skopeo inspect --authfile "$RUNNER_TEMP/pull-secret.json" \
+              "docker://registry.redhat.io/ubi9/ubi-minimal:latest" > /dev/null 2>&1; then
+          echo "::error::registry.redhat.io authentication failed. The pull-secret in Vault is expired or invalid. Rotate the credential at: secret/data/osac/e2e/pull-secret"
+          exit 1
+        fi
+        echo "registry.redhat.io pull-secret is valid."
+        echo "::endgroup::"
