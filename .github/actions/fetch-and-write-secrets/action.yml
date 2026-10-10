@@ -77,3 +77,24 @@ runs:
         printf '%s' "${AAP_LICENSE}" | base64 -d > "$RUNNER_TEMP/aap-license.zip"
         chmod 600 "$RUNNER_TEMP/aap-license.zip"
         echo "::endgroup::"
+
+    - name: Validate registry credentials
+      shell: bash
+      run: |
+        if ! command -v skopeo &>/dev/null; then
+          echo "::warning::skopeo is not installed — skipping pull-secret validation"
+          exit 0
+        fi
+
+        AUTH_FILE="${HOME}/.config/containers/auth.json"
+        IMAGE="docker://registry.redhat.io/ubi9/ubi-minimal:latest"
+
+        echo "Validating registry.redhat.io credentials with skopeo inspect..."
+        if ! skopeo inspect --authfile "${AUTH_FILE}" "${IMAGE}" >/dev/null 2>&1; then
+          echo "::error::registry.redhat.io pull secret is expired or invalid. " \
+               "Update the secret at 'secret/data/osac/e2e/pull-secret' in Vault. " \
+               "Marketplace operators (certified-operators, redhat-operators) cannot " \
+               "pull catalog images until this is fixed."
+          exit 1
+        fi
+        echo "✓ registry.redhat.io credentials are valid"
