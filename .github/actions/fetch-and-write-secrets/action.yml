@@ -77,3 +77,39 @@ runs:
         printf '%s' "${AAP_LICENSE}" | base64 -d > "$RUNNER_TEMP/aap-license.zip"
         chmod 600 "$RUNNER_TEMP/aap-license.zip"
         echo "::endgroup::"
+
+    - name: Validate registry credentials
+      shell: bash
+      run: |
+        echo "::group::Validate registry.redhat.io credentials"
+        max_attempts=3
+        attempt=0
+        success=false
+
+        while [ $attempt -lt $max_attempts ]; do
+          attempt=$((attempt + 1))
+          echo "Attempt ${attempt}/${max_attempts}: checking registry.redhat.io authentication..."
+
+          if skopeo inspect \
+               --authfile "${HOME}/.config/containers/auth.json" \
+               --retry-times 0 \
+               "docker://registry.redhat.io/ubi9/ubi-minimal:latest" \
+               > /dev/null 2>&1; then
+            success=true
+            echo "registry.redhat.io authentication succeeded on attempt ${attempt}."
+            break
+          fi
+
+          echo "Attempt ${attempt} failed."
+          if [ $attempt -lt $max_attempts ]; then
+            echo "Retrying in 5 seconds..."
+            sleep 5
+          fi
+        done
+
+        echo "::endgroup::"
+
+        if [ "$success" != "true" ]; then
+          echo "::error::registry.redhat.io authentication failed after ${max_attempts} attempts. The pull secret from Vault (secret/data/osac/e2e/pull-secret) is likely expired and needs renewal. See https://github.com/osac-project/osac-test-infra/issues/470"
+          exit 1
+        fi
